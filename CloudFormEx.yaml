@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Provision 2 Linux EC2 instances with Auto Scaling, VPC, Subnet, SG, RDS, S3.
+
+Resources:
+
+  NazVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: NazVPC1
+
+  MySubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref NazVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: MySubnet
+
+  MySubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref NazVPC
+      CidrBlock: 10.0.5.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: MySubnet2
+
+  TestInternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref NazVPC
+      InternetGatewayId: !Ref TestInternetGateway
+
+  MyRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref NazVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref MyRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref TestInternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref MySubnet
+      RouteTableId: !Ref MyRouteTable
+
+  MySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH and HTTP
+      VpcId: !Ref NazVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  NazLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: ami-05ffe3c48a9991133 # Amazon Linux 2 AMI (replace with region-specific AMI)
+        InstanceType: t2.micro
+        SecurityGroupIds:
+          - !Ref MySecurityGroup
+        UserData: !Base64 |
+          #!/bin/bash
+          sudo yum update -y
+          sudo yum install -y httpd
+          sudo systemctl start httpd
+          sudo systemctl enable httpd
+
+  NazAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref MySubnet
+      LaunchTemplate:
+        LaunchTemplateId: !Ref NazLaunchTemplate
+        Version: !GetAtt NazLaunchTemplate.LatestVersionNumber
+      MinSize: '2'
+      MaxSize: '2'
+      DesiredCapacity: '2'
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 300
+
+  MyScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref NazAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 50.0
+
+  MyDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: My DB Subnet Group
+      SubnetIds:
+        - !Ref MySubnet
+        - !Ref MySubnet2
+
+  NazRDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: mydbinstance
+      AllocatedStorage: '20'
+      DBInstanceClass: db.t3.micro
+      Engine: mysql
+      MasterUsername: admin
+      MasterUserPassword: Password123!
+      DBSubnetGroupName: !Ref MyDBSubnetGroup
+      VPCSecurityGroups:
+        - !GetAtt MySecurityGroup.GroupId
+      PubliclyAccessible: true
+
+  NazTestS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub naz-web-bucket-${AWS::AccountId}-${AWS::Region}
+
+Outputs:
+  VPCId:
+    Description: VPC Id
+    Value: !Ref NazVPC
+
+  SubnetId:
+    Description: Subnet Id
+    Value: !Ref MySubnet
+
+  AutoScalingGroup:
+    Description: Auto Scaling Group Name
+    Value: !Ref NazAutoScalingGroup
+
+  RDSInstanceEndpoint:
+    Description: RDS Endpoint
+    Value: !GetAtt NazRDSInstance.Endpoint.Address
+
+  S3BucketName:
+    Description: S3 Bucket Name
+    Value: !Ref NazTestS3Bucket
